@@ -66,7 +66,8 @@ cmsis_incs := -Iarch/cmsis
 arch_incs  := -Iarch $(cmsis_incs)
 bsp_incs   := $(arch_incs) -Ibsp -Iconfig
 drv_incs   := $(bsp_incs) -Idrv -Ilib
-os_incs    := $(arch_incs) -Ios -Iconfig
+os_incs    := $(arch_incs) -Ios -Ios/freertos/include \
+              -Ios/freertos/portable/GCC/ARM_CM4F -Iconfig
 lib_incs   := -Ilib
 proto_incs := -Ilib -Iproto -I$(SHARED)/proto
 app_incs   := $(drv_incs) $(os_incs) $(proto_incs) -Iapp -Iconfig

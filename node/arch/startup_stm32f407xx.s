@@ -10,6 +10,7 @@
  *   1. 拷 .data    FLASH → SRAM（_sidata → _sdata.._edata）
  *   2. 拷 .ccmram  FLASH → CCM （_siccmram → _sccmram.._eccmram，通常为空）
  *   3. 清 .bss     （_sbss.._ebss）
+ *   3b.清 .ccmbss  （_sccmbss.._eccmbss，CCM 里零初始化的堆/栈，不占 Flash）
  *   4. SystemInit  开 FPU + 配 PLL 到 168 MHz
  *   5. __libc_init_array  C 库的构造段（纯 C 时是空跑，留着不花钱）
  *   6. main
@@ -173,6 +174,17 @@ Reset_Handler:
 .Lzero_test:
     cmp    r0, r1
     bcc    .Lzero_loop
+
+    /* ---- 3b. .ccmbss: 清零（NOLOAD，不占 Flash） ---- */
+    ldr    r0, =_sccmbss
+    ldr    r1, =_eccmbss
+    movs   r3, #0
+    b      .Lczero_test
+.Lczero_loop:
+    str    r3, [r0], #4
+.Lczero_test:
+    cmp    r0, r1
+    bcc    .Lczero_loop
 
     /* ---- 4. 时钟与 FPU ---- */
     bl     SystemInit

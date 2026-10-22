@@ -154,6 +154,19 @@ SECTIONS
     } >CCMRAM AT> FLASH
     _siccmram = LOADADDR(.ccmram);
 
+    /* ---- CCM 的 .bss：全是零初始化的东西（堆、任务栈…），不需要占 Flash ----
+     * 用 NOLOAD 之后，这些字节只在 CCM 里占位，初值由启动代码清零。
+     * 段名故意不叫 .ccmram_bss —— 否则会被上面的 KEEP(*(.ccmram*)) 抓走。 */
+    .ccmbss (NOLOAD) :
+    {
+        . = ALIGN(8);
+        _sccmbss = .;
+        KEEP(*(.ccmbss))
+        KEEP(*(.ccmbss*))
+        . = ALIGN(8);
+        _eccmbss = .;
+    } >CCMRAM
+
     /* ---- 链接期溢出检查：堆 + 栈 必须还能放得下 ---- */
     ._user_heap_stack (NOLOAD) :
     {
