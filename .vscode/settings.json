@@ -1,0 +1,16 @@
+{
+  // 纯 C 工程：头文件按 C 解析，避免 C/C++ 扩展用 C++ 规则误报
+  "files.associations": {
+    "*.h": "c",
+    "*.ld": "plaintext"
+  },
+  // 编译产物不参与搜索/监视，避免 IntelliSense 与文件监视抖动
+  "search.exclude": {
+    "node/build": true,
+    "**/*.d": true,
+    "**/*.o": true
+  },
+  "files.watcherExclude": {
+    "**/node/build/**": true
+  }
+}
