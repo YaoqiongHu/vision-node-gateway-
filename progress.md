@@ -5,6 +5,54 @@
 
 ---
 
+## 2026-11-02（星期一）
+
+给 VSCode 配好**一键编译 / 烧写 / 调试**的闭环，并补齐外设寄存器视图。
+
+### 1. Cortex-Debug 扩展
+
+- 装的是 **marus25.cortex-debug 1.12.1**，目录 `~/.vscode/extensions/marus25.cortex-debug-1.12.1`。
+- 走了一个弯路：`code --install-extension marus25.cortex-debug` 卡死（市场接口超时），直接从 marketplace 下 VSIX 又被 `code` 报 `code: 'Extract'` —— 原因是拿到的文件是 **gzip 套了一层 zip**（`file` 显示 `gzip compressed data`）。`gunzip -c x.vsix > fixed.vsix` 解一层后再装就成功了。
+- `armToolchainPath` 必须显式写官方工具链路径：apt 那个 `gcc-arm-none-eabi` 包**不含 gdb**（历史原因，前面已卸）。
+
+### 2. `.vscode/tasks.json`
+
+| 任务 | 命令 | 说明 |
+|---|---|---|
+| `build` | `make` | `Ctrl+Shift+B` 默认任务，`problemMatcher` 用 `$gcc` + `fileLocation` 指向 `node/`，点错误能跳到源码 |
+| `flash` | `openocd … program vision-node.elf verify reset exit` | `dependsOn: build`，改完代码一键烧 |
+| `clean` / `test` / `check-layers` | 对应 make 目标 | |
+
+### 3. `.vscode/launch.json`
+
+两个配置，都基于 `type: cortex-debug` + `servertype: openocd`：
+
+- **调试（ST-Link + OpenOCD）**：`preLaunchTask: build` → 烧写 → 停在 `main()`
+- **烧写并调试（不重新构建）**：省掉编译那步
+
+关键字段：`openOCDLaunchCommands: ["adapter speed 1800"]`（ST-Link V2 实测最快 1800 kHz）、`device: STM32F407ZG`、`rtos: "FreeRTOS"`（调试侧栏能看到任务列表和栈水位）、`svdFile`。
+
+### 4. 外设寄存器视图（SVD）
+
+- 文件：[`node/arch/cmsis/STM32F407.svd`](node/arch/cmsis/STM32F407.svd)，2,164,866 字节，`schemaVersion="1.1"`，**91 个外设**（含 `RCC`/`USART1`/`DCMI`/`GPIOA`/`CAN1`/`FLASH`/`DMA1/2`），不含 `DWT`/`SysTick` 这类内核外设。
+- 来源：`cmsis-svd/cmsis-svd-data` 仓库（老地址 `posborne/cmsis-svd` 已废弃，文件迁走了），溯源与 sha256 记在 `node/arch/cmsis/README.md`。
+- 作用：调试时 `RCC->CFGR = 0x940A` 会展开成 `SW=PLL / HPRE=/1 / PPRE1=/4 / PPRE2=/2`，S3 调 DCMI 时 `CAPTURE`/`VSYNC`/`FNE` 这些位直接显示成勾选状态。
+
+### 5. 验证：F5 链路实测
+
+用 openocd + gdb 手工复现了 Cortex-Debug 会做的事：
+
+```
+target extended-remote :50021 → monitor reset halt → load → tbreak main → continue
+→ Temporary breakpoint 1, main () at app/main.c:111
+→ pc = 0x80005dc, sp = 0x20020000
+→ SystemCoreClock = 0xA037A00 = 168000000  ✓
+```
+
+烧写、复位、断点、符号解析全部正常。`node/vision-node.elf` 被 `node/.gitignore` 忽略，`build/` 同理。
+
+---
+
 ## 2026-10-22（星期四）
 
 今天从"零环境"做到 **S1 完成**：工具链落地 → 工程骨架 → 启动/链接/时钟 → 裸机点灯串口（S1a）→ FreeRTOS 双任务（S1b）。

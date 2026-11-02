@@ -1,0 +1,57 @@
+{
+    // VSCode 任务：Ctrl+Shift+B 构建（默认任务），F5 前会自动跑 build
+    // 任务列表里可以直接运行 flash / test / check-layers
+    "version": "2.0.0",
+    "options": {
+        "cwd": "${workspaceFolder}/node"
+    },
+    "tasks": [
+        {
+            "label": "build",
+            // 不用绝对路径调 gcc：Makefile 自己会在 ~/opt 下找工具链
+            "type": "shell",
+            "command": "make",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            // fileLocation 让点击错误能跳到源码：make 在 node/ 下跑，输出的是相对路径
+            "problemMatcher": {
+                "base": "$gcc",
+                "fileLocation": ["relative", "${workspaceFolder}/node"]
+            }
+        },
+        {
+            "label": "clean",
+            "type": "shell",
+            "command": "make clean",
+            "problemMatcher": []
+        },
+        {
+            // 纯烧写（不改代码、只想更新板子里的固件时用）
+            "label": "flash",
+            "type": "shell",
+            "command": "openocd",
+            "args": [
+                "-f", "interface/stlink.cfg",
+                "-f", "target/stm32f4x.cfg",
+                "-c", "adapter speed 1800",
+                "-c", "program ${workspaceFolder}/node/vision-node.elf verify reset exit"
+            ],
+            "dependsOn": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "test",
+            "type": "shell",
+            "command": "make test",
+            "problemMatcher": []
+        },
+        {
+            "label": "check-layers",
+            "type": "shell",
+            "command": "make check-layers",
+            "problemMatcher": []
+        }
+    ]
+}

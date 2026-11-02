@@ -1,0 +1,67 @@
+{
+    // 需要扩展：marus25.cortex-debug（已装 1.12.1）
+    // 依赖：openocd（/usr/bin/openocd）、arm-none-eabi-gdb（在 ~/opt 的官方工具链里，
+    //       而不是 apt 那个不带 gdb 的包 —— 所以这里必须显式指定 armToolchainPath）
+    //
+    // 用法：F5 直接进调试（会自动构建），断点、单步、外设寄存器都在调试侧栏里。
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "调试（ST-Link + OpenOCD）",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceFolder}/node",
+
+            "executable": "${workspaceFolder}/node/vision-node.elf",
+
+            // openocd 的脚本名，不要写绝对路径 —— 让它自己的 scripts/ 目录去找
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            // ST-Link V2 实际最快 1800 kHz；写 2000 会打一条 "Unable to match" 警告
+            "openOCDLaunchCommands": [
+                "adapter speed 1800"
+            ],
+
+            "device": "STM32F407ZG",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "build",
+
+            // 关键：apt 的 gcc-arm-none-eabi 包不含 gdb，这里钉死官方工具链
+            "armToolchainPath": "${env:HOME}/opt/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin",
+
+            // Cortex-Debug 内置 FreeRTOS 感知：能看到任务列表、当前任务、栈水位
+            "rtos": "FreeRTOS",
+
+            // 外设寄存器视图：调试侧栏会出现外设分组，寄存器按位域名显示
+            // （来源与校验和见 node/arch/cmsis/README.md）
+            "svdFile": "${workspaceFolder}/node/arch/cmsis/STM32F407.svd",
+
+            "showDevDebugOutput": "none"
+        },
+        {
+            // 不重新构建、只把当前 elf 烧进去并停在 main —— 改一行代码想看效果但不想等编译时用
+            "name": "烧写并调试（不重新构建）",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceFolder}/node",
+            "executable": "${workspaceFolder}/node/vision-node.elf",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "openOCDLaunchCommands": [
+                "adapter speed 1800"
+            ],
+            "device": "STM32F407ZG",
+            "runToEntryPoint": "main",
+            "armToolchainPath": "${env:HOME}/opt/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin",
+            "rtos": "FreeRTOS",
+            "svdFile": "${workspaceFolder}/node/arch/cmsis/STM32F407.svd",
+            "showDevDebugOutput": "none"
+        }
+    ]
+}

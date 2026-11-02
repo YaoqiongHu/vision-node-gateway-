@@ -46,3 +46,23 @@ a19edea6b2f4df2ab3c567782c4d313a52319c4303bd56ad7dd1d0e077014657  stm32f4xx.h
 - **原样引用，一个字节都不要改**。要打补丁就在 `arch/` 里另建文件包一层（比如 `arch/stm32f4xx_conf.h` 之类）。
 - 上面 5 个 CMSIS Core 文件是 **Apache-2.0**（文件头有 SPDX 标识）；3 个 ST 设备头写的是"licensed under terms in the LICENSE file in the root directory of this software component"，即 STM32CubeF4 根目录的 `LICENSE.md`。
 - `system_stm32f4xx.c` **不放这里**——那是我们自己写的（`arch/system_stm32f4xx.c`），因为时钟树要按 8 MHz 晶振 → 168 MHz 自己配，不用 ST 那份默认的。
+
+## STM32F407.svd
+
+不是头文件，但和上面这批是同一类东西：给**调试器**看的芯片描述，让寄存器按名字显示（见 `.vscode/launch.json` 的 `"svdFile"`）。
+
+| 项 | 值 |
+|---|---|
+| 来源 | https://raw.githubusercontent.com/cmsis-svd/cmsis-svd-data/main/data/STMicro/STM32F407.svd |
+| 说明 | `posborne/cmsis-svd` 已停止更新，数据迁到了 `cmsis-svd/cmsis-svd-data` |
+| 取用日期 | 2026-11-02 |
+| 大小 / 结构 | 2,164,866 字节，`schemaVersion="1.1"`，91 个外设 |
+| 覆盖 | `RCC` `USART1` `DCMI` `GPIOA~GPIOI` `CAN1` `FLASH` `DMA1/2` `TIM1~14` 等 |
+| 不含 | `DWT`/`SysTick` 这类内核外设（SVD 只描述芯片外设，内核寄存器由调试器自己处理） |
+| 影响 | 只有调试时用；不参与编译，删掉 `make` 照样过 |
+
+```sh
+# 校验
+sha256sum STM32F407.svd
+e2afca4f03f654225886d8508551cb7ac8f3c95ee28f18953aad466ecb56e6d6  STM32F407.svd
+```
