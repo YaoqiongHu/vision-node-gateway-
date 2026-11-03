@@ -21,6 +21,7 @@ void board_led_set(board_led_t led, int on);
 void board_led_toggle(board_led_t led);
 
 /** GPIO 通用配置，供同层的 bsp_uart / bsp_dcmi 等复用 */
+void board_gpio_enable_clock(GPIO_TypeDef *port);
 void board_gpio_output(GPIO_TypeDef *port, uint32_t pin);
 void board_gpio_af(GPIO_TypeDef *port, uint32_t pin, uint32_t af);
 void board_gpio_speed(GPIO_TypeDef *port, uint32_t pin, uint32_t speed);

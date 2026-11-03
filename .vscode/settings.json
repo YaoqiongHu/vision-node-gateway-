@@ -12,5 +12,6 @@
   },
   "files.watcherExclude": {
     "**/node/build/**": true
-  }
+  },
+  "cortex-debug.variableUseNaturalFormat": true
 }

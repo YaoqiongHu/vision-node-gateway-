@@ -62,7 +62,7 @@ void app_tasks_start(void)
 
     for (i = 0U; i < (sizeof(tasks) / sizeof(tasks[0])); i++) {
         if (os_task_create(&tasks[i]) != 0) {
-            printf("[os] 建任务 %s 失败：内核堆只剩 %lu B\r\n",
+            printf("[os] create task '%s' failed: only %lu B left in kernel heap\r\n",
                    tasks[i].name, (unsigned long)os_heap_free());
             for (;;) {
                 /* 停在这里，别带着残缺的任务集启动调度器 */
@@ -70,7 +70,7 @@ void app_tasks_start(void)
         }
     }
 
-    printf("[os] 已建 %lu 个任务，启动调度器（tick=%lu Hz）\r\n",
+    printf("[os] %lu task(s) created, starting scheduler (tick=%lu Hz)\r\n",
            (unsigned long)(sizeof(tasks) / sizeof(tasks[0])),
            (unsigned long)configTICK_RATE_HZ);
     bsp_uart_flush();

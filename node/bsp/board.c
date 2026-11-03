@@ -22,6 +22,34 @@ static uint32_t led_pin(board_led_t led)
     return (led == BOARD_LED0) ? BOARD_LED0_PIN : BOARD_LED1_PIN;
 }
 
+void board_gpio_enable_clock(GPIO_TypeDef *port)
+{
+    uint32_t bit;
+
+    if (port == GPIOA) {
+        bit = RCC_AHB1ENR_GPIOAEN;
+    } else if (port == GPIOB) {
+        bit = RCC_AHB1ENR_GPIOBEN;
+    } else if (port == GPIOC) {
+        bit = RCC_AHB1ENR_GPIOCEN;
+    } else if (port == GPIOD) {
+        bit = RCC_AHB1ENR_GPIODEN;
+    } else if (port == GPIOE) {
+        bit = RCC_AHB1ENR_GPIOEEN;
+    } else if (port == GPIOF) {
+        bit = RCC_AHB1ENR_GPIOFEN;
+    } else if (port == GPIOG) {
+        bit = RCC_AHB1ENR_GPIOGEN;
+    } else if (port == GPIOH) {
+        bit = RCC_AHB1ENR_GPIOHEN;
+    } else {
+        return;   /* 本板只引出 A..H */
+    }
+
+    RCC->AHB1ENR |= bit;
+    (void)RCC->AHB1ENR;   /* 读回一次，确保时钟在写端口寄存器前生效 */
+}
+
 void board_gpio_output(GPIO_TypeDef *port, uint32_t pin)
 {
     uint32_t shift = pin * 2U;

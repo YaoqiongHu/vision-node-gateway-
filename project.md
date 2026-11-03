@@ -102,61 +102,74 @@
 
 ### 3.2 接线
 
+> **完整的接线总表见 [`docs/wiring.md`](docs/wiring.md)** —— 那里有每一根线的排针位置、模块丝印对照、供电与电平规则、CAN 终端电阻、上电自检清单和踩过的坑。本节只保留决策要点。
+
 **A. OV7670 ↔ STM32F407**（走开发板摄像头接口，按板卡原理图核对引脚）
 
 | OV7670 | F407 | 说明 |
 |---|---|---|
 | VCC | 3.3V | **严禁 5V** |
 | GND | GND | — |
-| SCL / SDA | GPIO 模拟 | SCCB 配置通道，7 位地址 0x21 |
-| XCLK | MCO1 (PA8) 或板上 24MHz | OV7670 需外部时钟 8–24 MHz |
-| PCLK / VSYNC / HREF | DCMI_PIXCLK / DCMI_VSYNC / DCMI_HSYNC | — |
-| D0–D7 | DCMI_D0–D7 | 8 位并口 |
-| RESET / PWDN | GPIO（或直接上拉/接地） | 复位与低功耗控制 |
+| SCL / SDA | PB10 / PB11（软件 I²C） | SCCB 配置通道，7 位地址 0x21（写 0x42 / 读 0x43）；和 MPU6050 共用一条总线 |
+| XCLK | **PA8（MCO1，AF0，输出 HSE 8 MHz）** | 模块无晶振，必须外部送时钟；PC9 不能作 MCO2，它被 DCMI_D3 占用 |
+| PCLK | PA6（DCMI_PIXCLK） | — |
+| HREF | PA4（DCMI_HSYNC） | — |
+| VSYNC | PB7（DCMI_VSYNC） | — |
+| D0–D7 | PC6 / PC7 / PC8 / PC9 / PC11 / PD3 / PB8 / PB9 | DCMI_D0–D7，AF13 唯一映射，不可改 |
+| RESET | PE1 | 低有效，正常运行时拉高 |
+| PWDN | PE0 | 拉低才工作 |
+
+> **引脚冲突已解决**：DCMI_D6/D7 固定占 PB8/PB9，所以 **CAN1 不能走 PB8/PB9**，改用 PD0/PD1（见下面的 CAN 表）。
 
 **B. UART 链路（F407 ↔ Pi5）**
 
 | F407 | Pi5 | 说明 |
 |---|---|---|
-| USART TX (PA2) | GPIO15 / RXD (pin 10) | **交叉**：TX→RX |
-| USART RX (PA3) | GPIO14 / TXD (pin 8) | — |
-| GND | GND | **必须共地** |
+| USART1_TX (PA9) | GPIO15 / RXD (pin 10) | **交叉**：TX→RX |
+| USART1_RX (PA10) | GPIO14 / TXD (pin 8) | **交叉**：RX←TX |
+| GND | GND (pin 6) | **必须共地** |
 
-Pi5 侧用 `uart2`（GPIO4/5，pin 7/29）也可，避开板载 console 占用的 `ttyAMA0`。两端都是 3.3V TTL，**不需要电平转换**。
+用的是 **USART1（PA9/PA10）**，不是最早写的 PA2/PA3 —— 这两个脚在 J3 排针和 J5「ISP 串口」头上都有，
+接线最方便，而且 S1 的串口驱动已经跑在这对脚上，不用再改代码。
+从 **J3-32 / J3-31** 取线，不要从 J5 取（J5 第 1 脚是 5 V，接错会烧器件）。
+两端都是 3.3 V TTL，**不需要电平转换**；2 Mbps 下杜邦线控制在 20 cm 以内。
 
 **C. CAN 总线（F407 bxCAN ↔ Pi5 MCP2515）**
 
 | 节点 | 引脚 | 说明 |
 |---|---|---|
-| F407 | CAN_TX (PB9) / CAN_RX (PB8) → TJA1050（TXD→PB9、RXD→PB8）→ CANH/CANL | 收发器已有，直接接 |
+| F407 | **CAN_RX (PD0) / CAN_TX (PD1)** → TJA1050（TXD→PD1、RXD→PD0）→ CANH/CANL | 收发器已有，直接接。PB8/PB9 让给 DCMI_D6/D7 |
 | Pi5 MCP2515 | SPI0：CS=GPIO8(CE0)、MISO=GPIO9、MOSI=GPIO10、SCLK=GPIO11，INT=GPIO25 | 复用 SPI0 |
 | 总线 | CANH–CANH、CANL–CANL；两端各并 120 Ω | 短线可只在两端接 |
 
 **D. 供电与地**：F407 与 Pi5 各自独立供电；**只共 GND，不要把 5V 互连**（避免双电源倒灌）。
 
-**E. MPU6050 ↔ F407（Should，I2C2 独立总线）**
+**E. MPU6050 ↔ F407（Should，与 OV7670 共用 SCCB 总线）**
 
 | MPU6050 | F407 | 说明 |
 |---|---|---|
 | VCC | 3.3V | 模块多有 LDO，接 3.3V 最稳 |
 | GND | GND | — |
-| SCL | PB10（I2C2_SCL） | 4.7 kΩ 上拉到 3.3V（模块通常自带） |
-| SDA | PB11（I2C2_SDA） | — |
+| SCL | PB10 | 与 OV7670 同一条软件 I²C 总线（模块自带 4.7 kΩ 上拉） |
+| SDA | PB11 | — |
 | AD0 | GND | 地址 = 0x68（接 3.3V 则 0x69） |
-| INT | PE0（可选） | 数据就绪中断，不做轮询时用 |
+| INT | 不接 | S14 走轮询即可；PE0 已分给 OV7670 的 PWDN |
 
-> **为什么单独用 I2C2 而不和 OV7670 的 SCCB 共用 I2C1**：SCCB 是 I2C 的"近似协议"（不支持重复起始、ACK 语义宽松），和标准 I2C 设备混在一条总线上，出问题时很难判断是谁把总线拉住了。分总线多花两根杜邦线，省掉一整类玄学 bug。
+> **为什么不另开一条 I2C2**：PB10/PB11 本来就是 I2C2 的引脚，但本项目用软件 I²C 是为了兼容 SCCB。
+> 两者地址不冲突（0x21 vs 0x68），同一时刻只有一个从机被寻址，混在一条总线上不会互相干扰；
+> 而 DCMI 已经吃掉 11 个引脚，再开一条 I²C 纯属浪费。真出问题，`bsp_i2c_scan()` 一次就能看出是 0x21 没了还是 0x68 没了。
 
 ### 3.3 硬件确认结果（已核对）
 
 | 项 | 结论 | 对应动作 |
 |---|---|---|
 | OV7670 是否带 AL422B FIFO | **无 FIFO** | 走 DCMI + DMA 路线，步骤 3–4 方案不变 |
-| F407 侧 CAN 收发器 | **已有 TJA1050** | TXD→PB9、RXD→PB8、5V 供电；无需再买 |
-| MCP2515 模块 | **已有，8 MHz 晶振** | 设备树必须写 `oscillator=8000000` |
+| F407 侧 CAN 收发器 | **已有 TJA1050** | TXD→PD1、RXD→PD0、5V 供电；无需再买 |
+| MCP2515 模块 | **已有，8 MHz 晶振** | 设备树必须写 `oscillator=8000000`；**先确认模块是 3.3V 还是 5V 版**（5V 版 SPI 要加电平转换，否则会打坏 Pi5 的 GPIO，见 `docs/wiring.md` §7） |
 | 杜邦线 | **已有** | — |
-| 板卡型号 / 摄像头接口引脚 | 待确认 | 决定 D0–D7 / PCLK / VSYNC / HREF / XCLK 的具体引脚 |
-| XCLK 来源 | 待确认 | 模块自带晶振则直连；否则用 MCO1(PA8) 输出 8/24 MHz |
+| 板卡型号 | **DevEBox STM32F407ZGT6 核心板**（LQFP144，1 MB Flash，128K+64K） | HSE = 8 MHz，已实测 168 MHz 稳定 |
+| 摄像头接口引脚 | **已定**（见 3.2 表 A） | D0–D7 / PCLK / VSYNC / HREF / XCLK 全部落到排针 |
+| XCLK 来源 | **MCO1 (PA8) 输出 HSE 8 MHz** | 模块无晶振，必须外部送时钟 |
 
 Pi5 侧配置（8 MHz 是硬约束，写成 16M 会让 `can0` 直接起不来）：
 
@@ -252,7 +265,7 @@ ip -details link show can0                   # 确认 bitrate 500000、state ERR
 | `bsp/bsp_dcmi.c` | DCMI + DMA 双缓冲、帧中断 | DMA 循环模式，半满/全满回调切换缓冲 |
 | `lib/img/*.c` | RGB565→灰度、二值化、质心、组帧 | 定点运算，避免浮点；耗时用 DWT 计时 |
 | `bsp/bsp_can.c` + `proto/can_msgs.h` | bxCAN 初始化、过滤器、收发 | 标准帧 11 位 ID；500 kbps；错误计数上报 |
-| `drv/mpu6050/` | I2C2 读 6 轴 + 零偏校准（**Should**） | 与 SCCB 分总线，避免 SCCB 非标时序干扰；采样 1 kHz |
+| `drv/mpu6050/` | 读 6 轴 + 零偏校准（**Should**） | 与 OV7670 共用 PB10/PB11 的软件 I²C（地址 0x68）；采样 1 kHz |
 | `lib/attitude/` | 互补滤波/一阶低通 → roll/pitch（**Should**） | 定点实现；用 DWT 时间戳做 dt，不依赖 RTOS tick |
 | `proto/frame_proto.c` + `bsp/bsp_uart.c` | UART 帧协议、DMA 发送、命令解析 | CRC16-CCITT；帧头+长度+序号 |
 | `bsp/bsp_dwt.c` | DWT 周期计数、帧周期统计 | 算 jitter（max/mean） |
@@ -382,7 +395,7 @@ ip -details link show can0                   # 确认 bitrate 500000、state ERR
 | 步骤 | 目标 | 主要任务 | 完成判据 |
 |---|---|---|---|
 | **S1** | 工程骨架与双端环境 | 交叉编译链与 Makefile、FreeRTOS 移植（先只验证"两个任务点灯 + 串口"）、Pi5 侧 hello 模块 `insmod`/`rmmod`；README、`.gitignore`、分支与提交规范 | 两个任务能跑；模块能装卸；首个 commit |
-| **S2** | 三条通路先通，再写逻辑 | MCP2515 overlay（`oscillator=8000000`）+ `ip link` + `candump` 自发自收；TJA1050 接线与电平自检；I2C2 读 MPU6050 `WHO_AM_I`；OV7670 供电、XCLK、PCLK 波形确认 | `can0` ERROR-ACTIVE；读出 0x68；PCLK 有波形 |
+| **S2** | 三条通路先通，再写逻辑 | MCP2515 overlay（`oscillator=8000000`）+ `ip link` + `candump` 自发自收；TJA1050 接线与电平自检；软件 I²C 读 MPU6050 `WHO_AM_I`（与 OV7670 共用总线）；OV7670 供电、XCLK、PCLK 波形确认 | `can0` ERROR-ACTIVE；读出 0x68；PCLK 有波形 |
 | **S3** | 图像第一帧 | GPIO 模拟 SCCB 读 `0x0A`/`0x0B`；下初始化序列；DCMI 单帧抓取；串口打印像素 min/max/mean | 读到 0x76/0x73；统计值合理（非全 0/全 255） |
 | **S4** | 连续采集 | DCMI+DMA 循环模式、半满/全满中断、缓冲切换；帧率与丢帧统计；RGB565→灰度定点转换 | QQVGA 稳定 ≥15 fps（目标 30），1 h 丢帧 <1 % |
 | **S5** | 出目标坐标 | 可配阈值二值化、质心/面积、ROI 裁剪、DWT 计时、ASCII 可视化 | 串口输出坐标；单帧处理 ≤20 ms |
@@ -394,7 +407,7 @@ ip -details link show can0                   # 确认 bitrate 500000、state ERR
 | **S11** | 打通双总线 | SocketCAN 接收 + 解析 + 聚合转发；接收过滤器；bus-off 自动恢复 | 网关进程稳定运行 + 总线负载表 |
 | **S12** | 拿实时性数据 | F407：tick 驱动 vs 硬件定时器触发对比；Pi5：`cyclictest` / `ftrace irqsoff`；端到端延迟 | 实时性对比表 + 抖动源定位结论 |
 | **S13** | 诊断闭环 | UDS 0x10/0x22/0x27/0x3E；0x2E 写阈值 → UART 命令 → 节点生效；`python-can` 回归脚本 | 诊断脚本端到端跑通，0x2E 修改真实生效 |
-| **S14** | 多传感器（可选） | I2C2 读 6 轴、零偏校准、互补滤波、0x183 帧 | roll/pitch 合理，静止不漂 |
+| **S14** | 多传感器（可选） | 软件 I²C 读 6 轴、零偏校准、互补滤波、0x183 帧 | roll/pitch 合理，静止不漂 |
 | **S15** | 收口 | 文档（design/protocol/uds/perf/debug-log）、CI + `checkpatch` + 单测、博客 2 篇、3 分钟视频、简历 bullet、44 问 | v1.0 release；脱稿讲 30 分钟 |
 
 > **为什么 S6 才任务化**：S3–S5 阶段采集逻辑先用裸机主循环写，是为了让"OV7670 能不能出图"这个问题尽早、单独地暴露出来；同时调图像链路和 RTOS，出问题时无法二分。S6 再把已经验证过的逻辑搬进任务——**一次只引入一个新变量**。

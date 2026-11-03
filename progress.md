@@ -5,6 +5,79 @@
 
 ---
 
+## 2026-11-03（星期二）
+
+S2 打通两条硬件通路：**XCLK 送时钟**（S2①）和 **SCCB 认出 OV7670**（S2②）。CAN 那条留到下一轮。
+
+### 1. S2① XCLK：PA8 输出 8 MHz
+
+| 文件 | 内容 |
+|---|---|
+| `node/bsp/bsp_xclk.c` / `.h`（115 行） | `bsp_xclk_init()` / `bsp_xclk_hz()` / `bsp_xclk_source_name()` |
+| `node/bsp/board.c` / `.h` | 新增 `board_gpio_enable_clock()`（幂等，按 GPIOA..H 分支） |
+| `node/config/board_config.h` | `BOARD_XCLK_*`：端口/引脚/AF、源、分频 |
+| `node/app/main.c` | `print_xclk()`：打印源和频率 + 三个寄存器快照 |
+
+- **MCO1 编码**（核过 RM0090）：`RCC->CFGR` 的 `MCO1[1:0]`（bit22:21）= `00` HSI / `01` LSE / **`10` HSE** / `11` PLL；`MCO1PRE[2:0]`（bit26:24）= `0xx` 不分频 / `100`÷2 / `101`÷3 / `110`÷4 / `111`÷5。
+- 为了让 `board_config.h` 的宏和寄存器位**一个整数一一对应**，`BOARD_XCLK_SOURCE` 直接用寄存器编码（`2` = HSE），`BOARD_XCLK_DIV` 用分频值（`1` = 不分频）。
+- 实测：`RCC->CFGR = 0x0040940A`、`GPIOA->MODER = 0xA82A0000`，与写代码前预测的两个值**完全一致**；逻辑分析仪确认 PA8 = 8 MHz。
+- 走的一个弯路：用户先测到"不是 8 MHz"，最后查明是**逻辑分析仪采样率设太低**（24 MS/s 采 8 MHz 只有 3 点/周期）——不是代码问题。以后量时钟先确认采样率 ≥ 10 倍频率。
+
+### 2. S2② SCCB：读出 PID=0x76 / VER=0x73
+
+| 文件 | 内容 |
+|---|---|
+| `node/bsp/bsp_i2c_soft.c` / `.h` | 软件 I²C：`init/probe/write/read/scan`，100 kHz（半周期 5 µs，走 DWT 延时） |
+| `node/drv/ov7670/ov7670.c` / `.h` | 只管 OV7670 的寄存器协议：`write_reg/read_reg/chip_id/present` |
+| `node/app/main.c` | `sccb_selftest()`：先扫总线（有没有器件），再读 PID/VER（时序对不对） |
+
+- **SCCB ≠ 标准 I²C**，四个差别：① 第 9 位是"不关心位"，从机**不拉低**；② **不支持重复起始**，读寄存器必须"写地址 + STOP + START + 读"两次传输；③ 没有时钟延展；④ 最大 400 kHz。代码里 `ov7670_read_reg()` 就是按这个写的。
+- SCL/SDA 用 **BSRR/BRR 原子置位**而不是读改写 ODR；引脚用**开漏输出 + 内部上拉兜底**（模块自带 4.7 kΩ，内部 40 kΩ 并联也不影响）。
+- 读回 `PID = 0x76`、`VER = 0x73`，与手册一致。
+- 排障顺序（这次真的用上了）：**先读 GPIO 状态寄存器**（`PUPDR`/`IDR`）确认 MCU 侧没问题，再怀疑接线。实测 `GPIOB->IDR = 0x8FD8`（两条线空闲都是高）、`MODER = 0x00500280`、`PUPDR = 0x00500100`，全部正常 → 问题必然在模块侧。
+- 根因：**SCL 和 SDA 接反了**。对调后立刻正常。
+
+### 3. 引脚分配与冲突（已写进 `project.md`）
+
+| 信号 | 引脚 | 排针 | 备注 |
+|---|---|---|---|
+| XCLK | PA8（MCO1） | J3-33 | AF0 |
+| SCL / SDA | PB10 / PB11 | J2-54 / J2-53 | 软件 I²C，MPU6050 以后共用 |
+| PCLK | PA6 | J2-29 | DCMI 唯一映射 |
+| HREF | PA4 | J2-27 | |
+| VSYNC | PB7 | J3-3 | |
+| D0–D7 | PC6/PC7/PC8/PC9/PC11/PD3/PB8/PB9 | — | 8 根全是 AF13 唯一映射 |
+| PWDN / RESET | PE0 / PE1 | J2-2 / J2-1 | 不接也行，但留着能软件复位 |
+| **CAN_RX / TX** | **PD0 / PD1** | J3-22 / J3-21 | **让位**：PB8/PB9 被 DCMI_D6/D7 占了 |
+
+- 两个连带结论：`DCMI_D6=PB8`、`DCMI_D7=PB9` 在 F407 上**只有 AF13 这一个映射**，所以 CAN1 必须从 PB8/PB9 改到 PD0/PD1（`CAN1` 有重映射）；`PC9` 不能当 MCO2 用（被 `DCMI_D3` 占了），所以 XCLK 只能走 PA8。
+
+### 4. 串口输出全部改成英文
+
+判据：`grep -rnP '(printf|puts)\s*\(\s*"[^"]*[\x{4e00}-\x{9fff}]'` 命中为空。共改 5 句（`main.c` 3 句 + `app_tasks.c` 2 句）。**代码注释仍然保留中文** —— 注释不占串口带宽，读代码时还要用。
+
+### 5. 接线总表 `docs/wiring.md`
+
+新增了全项目的接线文档（[`docs/wiring.md`](docs/wiring.md)），把之前散在 `project.md` §3.2 里的接线细节收拢成一份"照着插线就能跑"的清单：
+
+- **F407 引脚分配总表**：DCMI 11 根 / SCCB 2 根 / CAN 2 根 / UART 2 根 / SWD 2 根 + 剩余可用引脚。
+- **完整冲突清单**：DCMI_D6/D7 逼 CAN1 改 PD0/PD1、DCMI_D3 逼 XCLK 只能走 PA8、OV7670 的 PWDN 占掉 PE0 所以 MPU6050 的 INT 不接、SD 卡占 PC8–PC12 和 DCMI 重叠。
+- **每个器件逐根线**：OV7670（18 根，含模块丝印 `SIOC`/`SIOD` 对照）、MPU6050（5 根）、TJA1050（8 脚全列）、UART→Pi5、MCP2515→Pi5（含 40-pin 编号）。
+- **供电与电平**：三条铁律（只共地不共电源、3.3V 器件不许接 5V、Pi5 的 GPIO 只接 3.3V）；TJA1050 为什么可以直连（PD0 是 FT 引脚）、MCP2515 5V 版为什么必须加电平转换。
+- **CAN 总线**：终端电阻 60 Ω、共地、双绞。
+- **上电顺序 + 分阶段自检表 + 已知的坑 7 条**。
+
+同时把 `project.md` 里两处过时的内容改掉了：UART 从最早写的 PA2/PA3 改成实际在用的 **PA9/PA10**；MPU6050 从"独立 I2C2"改成**与 OV7670 共用 SCCB 总线**（地址 0x21 和 0x68 不冲突，且 DCMI 已经占满引脚）。
+
+### 6. 当前状态与遗留
+
+- 构建：**FLASH 14,864 B (1.42%) / RAM 5,544 B (4.23%) / CCM 29,184 B (44.53%)，0 警告**。
+- 今天踩过一个坑：`config/board_config.h` 的 SCCB 段被 VSCode 的旧缓冲区覆盖过，编译报 `undeclared`。**改配置头文件前先确认编辑器里没有未保存的旧版本**。
+- **未提交**：`project.md` 的引脚表 + 今天全部 S2 代码。按计划攒到 S2 全做完再一起提交。
+- 下一步 **S2③：CAN**。建议先在 F407 上用 **CAN1 loopback 模式**自测（芯片内部把 TX 回送给 RX，不需要收发器也不需要 Pi5），把"位定时算错"和"总线/接线问题"分开；通了再接 TJA1050 + Pi5 的 MCP2515，用 `candump` 看 0x180。
+
+---
+
 ## 2026-11-02（星期一）
 
 给 VSCode 配好**一键编译 / 烧写 / 调试**的闭环，并补齐外设寄存器视图。

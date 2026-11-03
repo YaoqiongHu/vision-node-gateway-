@@ -32,6 +32,37 @@
 #define BOARD_UART_RX_PIN       10U
 #define BOARD_UART_BAUD         115200U
 
+/* ---------- 摄像头 XCLK ----------：
+ * OV7670 模块没有晶振，必须由 MCU 送时钟（6.5–27 MHz，典型 8/12/24 MHz）。
+ *   PA8 = MCO1 → J3 第 33 脚
+ * MCO1 可选源：HSI 16M / LSE 32k / HSE 8M / PLL；分频 1~5。
+ * 这里用 HSE 不分频 → 8 MHz，不占定时器、不用中断。
+ * 注意 PC9 不能当 MCO2 用 —— 它被 DCMI_D3 占用。 */
+#define BOARD_XCLK_PORT         GPIOA
+#define BOARD_XCLK_PIN          8U
+#define BOARD_XCLK_AF           0U          /* PA8 的 MCO1 是 AF0（AFR 复位值即 0） */
+
+/* MCO1 源选择，编码与 RCC_CFGR 的 MCO1[1:0] 完全一致：
+ *   0 = HSI 16 MHz    1 = LSE 32.768 kHz    2 = HSE 8 MHz    3 = PLL 168 MHz
+ * 现在用 2（8 MHz）：边沿慢、逻辑分析仪好测，S2 只验"时钟送出来了"。
+ * S4 要求 QQVGA ≥15 fps，8 MHz 下帧率只有约 10 fps，那时把这里改成 0
+ * （HSI 16 MHz → 约 20 fps）。HSI 精度 ±1%，对摄像头够用。 */
+#define BOARD_XCLK_SOURCE       2
+#define BOARD_XCLK_DIV          1U          /* MCO1PRE：1 = 不分频，2~5 = 除以 2~5 */
+
+/* ---------- SCCB / 软件 I²C ----------
+ * OV7670 的配置通道叫 SCCB，电气上就是 I²C，只是第 9 位不要 ACK、不能用重复起始。
+ *   SCL = PB10 → J2 第 54 脚
+ *   SDA = PB11 → J2 第 53 脚
+ * 两条线都靠上拉电阻拉高，模块上一般自带 4.7 kΩ；这里再开内部上拉（约 40 kΩ）兜底。
+ * MPU6050 以后共用这条总线（地址 0x68）。 */
+#define BOARD_SCCB_SCL_PORT     GPIOB
+#define BOARD_SCCB_SCL_PIN      10U
+#define BOARD_SCCB_SDA_PORT     GPIOB
+#define BOARD_SCCB_SDA_PIN      11U
+/* 半周期微秒数：5 µs → 约 100 kHz。先把速度压慢，波形看得清、分析仪好抓。 */
+#define BOARD_SCCB_HALF_US      5U
+
 /* ---------- 调试口 ----------
  * SWD：PA13 = SWDIO（J3-28）、PA14 = SWCLK（J3-27）。这两个脚不要挪作他用。 */
 

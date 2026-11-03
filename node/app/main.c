@@ -4,8 +4,11 @@
 #include "stm32f4xx.h"
 #include "board.h"
 #include "bsp_dwt.h"
+#include "bsp_i2c_soft.h"
 #include "bsp_uart.h"
+#include "bsp_xclk.h"
 #include "board_config.h"
+#include "ov7670/ov7670.h"
 #include "app_tasks.h"
 
 /* 给调试器看的量：openocd 里 `mdw &g_uptime_ms` 就能确认主循环真的在跑。
@@ -14,6 +17,7 @@ volatile uint32_t g_led0_toggles;
 volatile uint32_t g_selftest_tx;
 volatile uint32_t g_selftest_rx;
 volatile int32_t  g_selftest_result;   /* 1 = 通过 / 0 = 不匹配 / -1 = 没收到 */
+volatile uint16_t g_sccb_id;           /* (PID << 8) | VER，正常 0x7673 */
 
 /* ---------------------------------------------------------------------------
  * 串口自环自检：把 PA9(TX) 和 PA10(RX) 用一根杜邦线短接，
@@ -48,14 +52,14 @@ static void uart_loopback_selftest(void)
 
     if (n == 0U) {
         g_selftest_result = -1;
-        printf("[loopback] 没收到数据 —— PA9 和 PA10 之间没接跳线，跳过\r\n");
+        printf("[loopback] disconnected\r\n");
     } else if ((n == expect) && (memcmp(rx, kProbe, expect) == 0)) {
         g_selftest_result = 1;
-        printf("[loopback] PASS：%lu 字节原样收回，收发链路 OK\r\n",
+        printf("[loopback] PASS：%lu  OK\r\n",
                (unsigned long)n);
     } else {
         g_selftest_result = 0;
-        printf("[loopback] FAIL：期望 %lu 字节，收到 %lu 字节\r\n",
+        printf("[loopback] FAIL： %lu  %lu \r\n",
                (unsigned long)expect, (unsigned long)n);
     }
 }
@@ -83,7 +87,7 @@ static void print_banner(void)
     uint32_t q = (pllcfgr & RCC_PLLCFGR_PLLQ) >> RCC_PLLCFGR_PLLQ_Pos;
 
     printf("\r\n");
-    printf("=== vision-node / S1a ===\r\n");
+    printf("=== vision-node / S2-1  XCLK ===\r\n");
     printf("build     : %s %s\r\n", __DATE__, __TIME__);
     printf("board     : %s\r\n", board_name());
     printf("SYSCLK    : %lu Hz  (SystemCoreClock = %lu)\r\n",
@@ -107,6 +111,50 @@ static void print_banner(void)
     printf("----------------------------------------\r\n");
 }
 
+/* S2 第一步的自检输出：把"应该是什么"和"寄存器里实际是什么"放在同一行，
+ * 现场没带 USB-TTL 时，用调试器读这几个寄存器也能判断。 */
+static void print_xclk(int ok)
+{
+    if (ok) {
+        printf("xclk      : PA8 <- MCO1 %s = %lu Hz\r\n",
+               bsp_xclk_source_name(), (unsigned long)bsp_xclk_hz());
+        printf("            GPIOA MODER=0x%08lx AFR[1]=0x%08lx CFGR=0x%08lx\r\n",
+               (unsigned long)BOARD_XCLK_PORT->MODER,
+               (unsigned long)BOARD_XCLK_PORT->AFR[1],
+               (unsigned long)RCC->CFGR);
+    } else {
+        printf("xclk      : FAIL - HSE not ready, PA8 stays silent\r\n");
+    }
+}
+
+/* S2 第二步：SCCB 自检。
+ * 分两步看：先扫总线（有没有器件应答），再读 OV7670 的 PID/VER（读写时序对不对）。
+ * 这两步分开，能把"线没接"和"时序写错"区分开。 */
+static void sccb_selftest(void)
+{
+    uint8_t pid = 0U;
+    uint8_t ver = 0U;
+    int     n;
+
+    bsp_i2c_init();
+
+    n = bsp_i2c_scan();
+
+    (void)ov7670_read_reg(OV7670_REG_PID, &pid);
+    (void)ov7670_read_reg(OV7670_REG_VER, &ver);
+    g_sccb_id = (uint16_t)(((uint16_t)pid << 8) | (uint16_t)ver);
+
+    printf("[sccb] OV7670 PID=0x%02X VER=0x%02X  -> %s\r\n",
+           (unsigned)pid, (unsigned)ver, ov7670_present() ? "OK" : "FAIL");
+
+    if ((n > 0) && (pid == 0U) && (ver == 0U)) {
+        printf("[sccb] bus has a device but OV7670 does not answer: SCL/SDA swapped?\r\n");
+    }
+    if (n == 0) {
+        printf("[sccb] no ACK on the whole bus: check pull-ups (~4.7k to 3.3V) and wires\r\n");
+    }
+}
+
 int main(void)
 {
     /* SystemInit() 已由启动文件调用：FPU 打开 + HSE/PLL → 168 MHz。 */
@@ -115,7 +163,12 @@ int main(void)
     bsp_uart_init(BOARD_UART_BAUD);
     setvbuf(stdout, NULL, _IONBF, 0);
 
+    /* S2 第一步：先把摄像头的时钟送出去。XCLK 没有，OV7670 连 SCCB 都不应答。 */
+    int xclk_ok = bsp_xclk_init();
+
     print_banner();
+    print_xclk(xclk_ok);
+    sccb_selftest();
     uart_loopback_selftest();
 
     /* S1b：从这里交给 FreeRTOS。main() 之后不再返回。 */
