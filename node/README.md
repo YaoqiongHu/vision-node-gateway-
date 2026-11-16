@@ -117,6 +117,19 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 2. 改完配置立刻生效不了时：`Ctrl+Shift+P` → **C/C++: Reset IntelliSense Database**，再 → **Developer: Reload Window**。
 3. `compilerPath` 里的版本号是**写死**的。换工具链版本时改这一行；`make` 不用改（它按 `~/opt/arm-gnu-toolchain-*` 自动挑最新的）。
 
+#### 调试：Cortex-M4 只有 6 个硬件断点
+
+`.vscode/launch.json` 里的 `runToEntryPoint: "main"` 是靠 gdb **临时插一个硬件断点**实现的。Cortex-M4 的硬件断点单元一共只有 **6 个**，编辑器里留下的断点一多就会占满，表现为：
+
+```
+Cannot insert hardware breakpoint 2: Remote failure reply: 0E
+→ continue 失败 → 弹窗 "A serious error occurred with gdb, unable to continue or interrupt"
+```
+
+本项目踩过：`bsp_i2c_soft.c:219/222` + `main.c:143/145/146/173` 共 6 个断点，加上 `main` 的临时断点正好 7 个，超了 1 个。**保持启用的断点 ≤ 5 个**即可。
+
+另外留了一个不消耗断点的配置「调试（精简，无外设视图）」：它不设 `runToEntryPoint`，启动后停在复位向量，按继续就跑起来。
+
 ## 加一个文件
 
 把 `.c` 放进对应目录即可，Makefile 自动收集；头文件用相对仓库根 `node/` 的路径 include。

@@ -5,6 +5,104 @@
 
 ---
 
+## 2026-11-16（星期一）
+
+S2 第三条通路 **CAN** 开始落地：驱动写完、两个硬件坑修掉，但**回环自测还没通过**，今天收工在此。
+
+### 1. 新增 CAN 驱动
+
+| 文件 | 内容 |
+|---|---|
+| `node/bsp/bsp_can.c`（291 行） | 轮询式 bxCAN1：`bsp_can_init/tx/rx/loopback_selftest/btr/error_counters` |
+| `node/bsp/bsp_can.h` | `bsp_can_frame_t { id, data[8], len }` + 接口声明 |
+| `node/config/board_config.h` | `BOARD_CAN_*`：PD1=TX / PD0=RX / AF9 / 500 kbps / `BOARD_CAN_BTR = 0x001A0005` |
+| `node/app/main.c` | `can_selftest()`：初始化 → 回环自测 → 打印位定时与 GPIO 快照 |
+| `node/app/app_tasks.c` | `task_report` 每秒发一帧 `0x180`，统计 `can=ok/--` |
+
+**位定时推导**（写在 `board_config.h` 注释里）：APB1 = 42 MHz → `tq = 6/42 MHz = 142.857 ns`，一位 = `1 + 11 + 2 = 14 tq = 2 µs` → **500 kbps**，采样点 `(1+11)/14 = 85.7%`，`BRP=5 / TS1=10 / TS2=1 / SJW=1` → `BTR = 0x001A0005`。
+
+### 2. 修掉的两个坑
+
+| 现象 | 根因 | 修法 |
+|---|---|---|
+| `GPIOD->MODER` 读回一直是 `0x00000000` | `board_gpio_af()` **只写 MODER/AFR，不开端口时钟**（uart/xclk 都是调用方自己开 GPIOA） | `bsp_can_init()` 里先 `board_gpio_enable_clock()` |
+| CAN 不收不发也不报错 | **`MCR.SLEEP = 1`**（复位值 `0x00010002`），控制器在睡眠 | 初始化前清 `MCR.SLEEP` 并等 `MSR.SLAK` 归零 |
+
+修后实测：`GPIOD MODER = 0x0000000A`（PD0/PD1 均 AF）、`AFR[0] = 0x00000099`（两个 nibble 都是 9 = AF9）、`MCR = 0x00010040`、`MSR = 0x00000C08`。
+
+### 3. 回环自测：**未通过**
+
+读回调试变量 `g_can_dbg[0..11]`：
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| 进/出初始化模式 | `0 / 0` | 都成功 |
+| `BTR` | `0x401A0005` | 回环位定时已生效 |
+| 发送结果 | `0` | 报成功 |
+| 接收结果 | `0` | **2 ms 内一帧没收到** |
+| `MSR` | `0x00000C08` | INAK=0、SLAK=0、ERRI=1 |
+| `RF0R` | `0` | 接收 FIFO 空 |
+| `TSR` | `0x1C000000` | 三个邮箱全空、RQCP0/TXOK0 都是 0 |
+| `ESR` | `0` | 无错误计数 |
+
+已经排除：位定时（手工算过、寄存器读回一致）、过滤器（`FM1R=1 / FS1R=1 / FFA1R=0 / FA1R=1 / FR1=FR2=0` 全通过）、引脚复用（MODER/AFR 正确）、发送流程（TSR 显示确实发出去了）。
+
+**最关键的矛盾**：同一套寄存器序列，用调试器**手动**跑能收到帧（`RF0R` 的 FMP0 变成 1，FIFO 里 `RIR=0x24600000` 即 ID 0x123、`RDLR=0xDEADBEEF`），**固件里跑收不到**。目前锁定两个未验证的差异：
+
+1. 固件 `MCR = 0x00010040`，**DBF（调试冻结，bit16）= 1**；手动实验第一步就把 DBF 清成了 0。
+2. `can_send_raw()` 在发送后立刻写 1 清 `RQCP0` 的时序可疑（`TSR` 读回 RQCP0/TXOK0 全为 0，说明等到的可能是上一帧的标志）。
+
+### 4. 下一步
+
+- 对照实验：① `bsp_can_init()` 里补一句清 DBF；② `can_send_raw()` 发送前先清 `RQCP0`。两处各一行，一次烧写即可判定。
+- 或者跳过回环，直接接 **TJA1050 + Pi5 的 MCP2515 实测**（真实对端 ACK 比内部自应答更接近实战）。用户手上有 MCP2515 模块和 TJA1050 模块，接线方案已写进 [`docs/wiring.md`](docs/wiring.md) §5 与 §8。
+- 调试用的 `g_can_dbg[]` 探针是临时的，S2 通过后要删掉。
+
+### 5. 当前状态与遗留
+
+- 构建：**FLASH 16,388 B (1.56%) / RAM 5,608 B (4.28%) / CCM 29,184 B (44.53%)，0 警告**。
+- 未接线：F407 与 TJA1050、Pi5 与 MCP2515 都还没接，今天只做了芯片内部回环。
+- 固件仍是"回环自测"状态，接好线后需要改成真实发送/接收测试。
+
+---
+
+## 2026-11-13（星期五）
+
+修调试链路 + 三个 bug + 两处文档/注释纠错。
+
+### 1. VSCode 按 F5 调试失败（已修）
+
+现象：点调试后弹窗 `A serious error occurred with gdb, unable to continue or interrupt`，栈停在 `Reset_Handler`，程序从头到尾没跑起来。
+
+**根因**：`runToEntryPoint: "main"` 是靠 gdb 临时插一个**硬件断点**实现的，而 Cortex-M4 的硬件断点单元一共只有 **6 个**。当时编辑器里留着 6 个断点（`bsp_i2c_soft.c:219/222`、`main.c:143/145/146/173`），加上 `main` 的临时断点正好 7 个，超了 1 个：
+
+```
+Cannot insert hardware breakpoint 2: Remote failure reply: 0E
+→ continue 命令失败 → Cortex-Debug 的 handleContinueFailed()
+```
+
+排查过程中确认了很多"不是"的原因：openocd 正常、工具链正常、符号正常、`armToolchainPath` 正常、`CDRTOSConfigure FreeRTOS` 正常（命令行复刻 F5 全流程每次都成功，只有 VSCode 里失败）。
+
+处置：① 在 `node/README.md` 记下"保持启用的断点 ≤ 5 个"；② 新增一个不设 `runToEntryPoint` 的配置「调试（精简，无外设视图）」；③ `.vscode/tasks.json` 加 `kill-openocd` 前置任务（清掉上次异常退出的 openocd）；④ 两个配置都打开 gdb 全量日志 `/tmp/cortex-gdb.log`。
+
+### 2. `print_banner()` 的 PLLP 显示错误
+
+`main.c` 里写的是 `(字段 >> Pos) + 1`，打出 `P=1`。**PLLP 字段编码是 `00`÷2、`01`÷4、`10`÷6、`11`÷8，分频值 = 2 ×（字段 + 1）**。改完后串口显示 `PLL : src=HSE M=8 N=336 P=2 Q=7`。
+
+### 3. `ov7670_read_reg()` 的注释是错的
+
+原注释写"SCCB 没有'当前地址指针'这个概念"，**错**。芯片内部确实有寄存器地址指针：第一段传输把寄存器地址写进这个指针（不是写数据寄存器），STOP 不会清掉；第二段以读地址 0x43 重新起始，芯片吐出指针指向的内容。必须分两段的原因是 **SCCB 不支持重复起始**，与"有没有指针"无关。注释已改。
+
+### 4. 上电后第一个字节是 `0xFF` 的成因
+
+不是"PA9 默认低电平"：复位后 `MODER=0`（输入）、`PUPDR=0`（无上下拉），PA9 是**高阻悬空**。`0xFF` 是"线上被拉低一次"的指纹（起始位低 + 8 个数据位全 1）。每次上电必现的原因是**上电瞬态**：板子 3V3 从 0 V 爬升时，PA9 内部指向 VDD 的 ESD 钳位二极管把线钳到 0 V，USB-TTL 判成起始位；VDD 升过阈值后钳位失效、线被拉回高，凑成一个合法 `0xFF` 帧。处置：先给板子上电再插 USB-TTL；外部上拉和改代码都无效。
+
+### 5. 逻辑分析仪把 I²C 解成乱码
+
+用户截图上 I²C 解码全是乱跳的地址和非法字节。**根因是解码器挂错了通道**，实际解的是 PA9（UART TX）的比特流 —— I²C 帧出现在 `bsp_i2c_init()` 执行之前（那一刻 PB10/PB11 还是输入态），物理上不可能有 I²C 波形。修法：I²C 解码器手工指定 SCL=PB10、SDA=PB11 通道。
+
+---
+
 ## 2026-11-03（星期二）
 
 S2 打通两条硬件通路：**XCLK 送时钟**（S2①）和 **SCCB 认出 OV7670**（S2②）。CAN 那条留到下一轮。
