@@ -63,6 +63,29 @@
 /* 半周期微秒数：5 µs → 约 100 kHz。先把速度压慢，波形看得清、分析仪好抓。 */
 #define BOARD_SCCB_HALF_US      5U
 
+/* ---------- CAN1（S2 第三条通路）----------
+ * 元数据总线，500 kbps，对端是树莓派上的 MCP2515 + TJA1050。
+ *   CAN1_RX = PD0 → J3 第 22 脚   ← TJA1050 的 RXD
+ *   CAN1_TX = PD1 → J3 第 21 脚   → TJA1050 的 TXD
+ * 为什么不用 PB8/PB9：那两个脚是 AF9 的默认映射，但被 DCMI_D6/D7 占了；
+ * PD0/PD1 是 CAN1 的重映射脚，正好顶上（本项目第 1 号引脚冲突）。
+ * TJA1050 的 S 脚必须接 GND（高速模式），电源 5 V。 */
+#define BOARD_CAN               CAN1
+#define BOARD_CAN_AF            9U
+#define BOARD_CAN_RX_PORT       GPIOD
+#define BOARD_CAN_RX_PIN        0U
+#define BOARD_CAN_TX_PORT       GPIOD
+#define BOARD_CAN_TX_PIN        1U
+#define BOARD_CAN_BITRATE       500000U
+
+/* 位定时：APB1 = 42 MHz。
+ *   tq        = 6 / 42 MHz = 142.857 ns   （BRP = 5，即分频 6）
+ *   一位      = 1(SYNC) + 11(BS1) + 2(BS2) = 14 tq = 2 µs  → 500 kbps
+ *   采样点    = (1 + 11) / 14 = 85.7%      （CiA 推荐的 87.5% 附近）
+ *   SJW       = 1 tq
+ * 组成：BRP=5 | TS1=10<<16 | TS2=1<<20 = 0x001A0005 */
+#define BOARD_CAN_BTR           0x001A0005U
+
 /* ---------- 调试口 ----------
  * SWD：PA13 = SWDIO（J3-28）、PA14 = SWCLK（J3-27）。这两个脚不要挪作他用。 */
 

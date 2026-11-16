@@ -144,8 +144,6 @@ static uint8_t i2c_read_byte(int ack)
     return byte;
 }
 
-/* ---------------------------------------------------------------- 对外接口 */
-
 static void i2c_pin_init(GPIO_TypeDef *port, uint32_t pin)
 {
     uint32_t shift = pin * 2U;
@@ -158,6 +156,8 @@ static void i2c_pin_init(GPIO_TypeDef *port, uint32_t pin)
     port->PUPDR = (port->PUPDR & ~(3UL << shift)) | (1UL << shift);  /* 01 = 内部上拉兜底 */
     port->BSRR = (1UL << pin);                                       /* 释放总线 */
 }
+
+/* ---------------------------------------------------------------- 对外接口 */
 
 void bsp_i2c_init(void)
 {
@@ -215,7 +215,7 @@ int bsp_i2c_scan(void)
 
     for (addr = 0x08U; addr <= 0x77U; addr++) {
         if (bsp_i2c_probe(addr) != 0) {
-            printf(" 0x%02X", (unsigned)addr);
+            printf(" find device 0x%02X", (unsigned)addr);
             found++;
         }
     }

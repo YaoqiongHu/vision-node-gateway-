@@ -28,6 +28,17 @@
             "problemMatcher": []
         },
         {
+            // 调试启动前先清掉残留的 openocd。
+            // 上一次调试异常退出时，旧 openocd 可能还攥着 ST-Link 和 3333 端口，
+            // 新会话就连到一个正在退出的服务上 —— 现象正是"能停在复位，
+            // 一按继续就弹 A serious error occurred with gdb, unable to continue or interrupt"。
+            "label": "kill-openocd",
+            "type": "shell",
+            "command": "pkill -x openocd || true",
+            "dependsOn": "build",
+            "problemMatcher": []
+        },
+        {
             // 纯烧写（不改代码、只想更新板子里的固件时用）
             "label": "flash",
             "type": "shell",

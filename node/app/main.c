@@ -3,6 +3,7 @@
 
 #include "stm32f4xx.h"
 #include "board.h"
+#include "bsp_can.h"
 #include "bsp_dwt.h"
 #include "bsp_i2c_soft.h"
 #include "bsp_uart.h"
@@ -18,6 +19,9 @@ volatile uint32_t g_selftest_tx;
 volatile uint32_t g_selftest_rx;
 volatile int32_t  g_selftest_result;   /* 1 = 通过 / 0 = 不匹配 / -1 = 没收到 */
 volatile uint16_t g_sccb_id;           /* (PID << 8) | VER，正常 0x7673 */
+volatile int32_t  g_can_loopback = -2; /* 0 = 回环自测通过；-1 = 失败；-2 = 还没跑 */
+volatile uint32_t g_can_tx_ok;         /* 正常模式下成功发出的帧数 */
+volatile uint32_t g_can_tx_fail;       /* 发不出去（对端没上线 / 没 ACK）的次数 */
 
 /* ---------------------------------------------------------------------------
  * 串口自环自检：把 PA9(TX) 和 PA10(RX) 用一根杜邦线短接，
@@ -83,7 +87,9 @@ static void print_banner(void)
     uint32_t pllcfgr = RCC->PLLCFGR;
     uint32_t m = pllcfgr & RCC_PLLCFGR_PLLM;
     uint32_t n = (pllcfgr & RCC_PLLCFGR_PLLN) >> RCC_PLLCFGR_PLLN_Pos;
-    uint32_t p = ((pllcfgr & RCC_PLLCFGR_PLLP) >> RCC_PLLCFGR_PLLP_Pos) + 1U;
+    /* PLLP 字段编码 00=÷2 01=÷4 10=÷6 11=÷8，分频值 = 2 x (字段 + 1)。
+     * 写成"字段 + 1"会打出 P=1（实际是 ÷2）。 */
+    uint32_t p = 2U * (((pllcfgr & RCC_PLLCFGR_PLLP) >> RCC_PLLCFGR_PLLP_Pos) + 1U);
     uint32_t q = (pllcfgr & RCC_PLLCFGR_PLLQ) >> RCC_PLLCFGR_PLLQ_Pos;
 
     printf("\r\n");
@@ -155,6 +161,35 @@ static void sccb_selftest(void)
     }
 }
 
+/* S2 第三步：CAN1 自检。
+ * 先跑内部回环（控制器自己发自己收，不需要收发器、不需要对端），
+ * 通了才能说明位定时和寄存器配置是对的；然后再切回正常模式等对端上线。 */
+static void can_selftest(void)
+{
+    uint8_t tec = 0U;
+    uint8_t rec = 0U;
+    int     ok;
+
+    if (bsp_can_init() != 0) {
+        printf("[can] init FAILED: controller never left init mode\r\n");
+        return;
+    }
+
+    ok = bsp_can_loopback_selftest();
+    g_can_loopback = (int32_t)ok;
+    bsp_can_error_counters(&tec, &rec);
+
+    printf("[can] loopback %s  BTR=0x%08lX (%lu kbps)  TEC=%u REC=%u\r\n",
+           (ok == 0) ? "OK" : "FAIL",
+           (unsigned long)bsp_can_btr(),
+           (unsigned long)(BOARD_CAN_BITRATE / 1000U),
+           (unsigned)tec, (unsigned)rec);
+    printf("            PD0/PD1 AF%lu  GPIOD MODER=0x%08lX AFR=0x%08lX\r\n",
+           (unsigned long)BOARD_CAN_AF,
+           (unsigned long)GPIOD->MODER,
+           (unsigned long)GPIOD->AFR[0]);
+}
+
 int main(void)
 {
     /* SystemInit() 已由启动文件调用：FPU 打开 + HSE/PLL → 168 MHz。 */
@@ -169,6 +204,7 @@ int main(void)
     print_banner();
     print_xclk(xclk_ok);
     sccb_selftest();
+    can_selftest();
     uart_loopback_selftest();
 
     /* S1b：从这里交给 FreeRTOS。main() 之后不再返回。 */

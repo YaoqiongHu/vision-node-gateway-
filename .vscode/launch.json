@@ -27,10 +27,20 @@
 
             "device": "STM32F407ZG",
             "runToEntryPoint": "main",
-            "preLaunchTask": "build",
+            // kill-openocd 会先跑 build，再清掉可能残留的 openocd 进程，
+            // 避免新会话连到上一次没退干净的 gdb server 上
+            "preLaunchTask": "kill-openocd",
 
             // 关键：apt 的 gcc-arm-none-eabi 包不含 gdb，这里钉死官方工具链
             "armToolchainPath": "${env:HOME}/opt/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin",
+
+            // gdb 全量日志：出问题时看 /tmp/cortex-gdb.log 能拿到真实错误
+            // （每次启动覆盖，不会越长越大）
+            "preLaunchCommands": [
+                "set logging file /tmp/cortex-gdb.log",
+                "set logging overwrite on",
+                "set logging enabled on"
+            ],
 
             // Cortex-Debug 内置 FreeRTOS 感知：能看到任务列表、当前任务、栈水位
             "rtos": "FreeRTOS",
@@ -58,10 +68,53 @@
             ],
             "device": "STM32F407ZG",
             "runToEntryPoint": "main",
+            "preLaunchTask": "kill-openocd",
             "armToolchainPath": "${env:HOME}/opt/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin",
+            "preLaunchCommands": [
+                "set logging file /tmp/cortex-gdb.log",
+                "set logging overwrite on",
+                "set logging enabled on"
+            ],
             "rtos": "FreeRTOS",
             "svdFile": "${workspaceFolder}/node/arch/cmsis/STM32F407.svd",
             "showDevDebugOutput": "none"
+        },
+        {
+            // 精简版：去掉外设寄存器视图（svdFile）和 FreeRTOS 任务视图（rtos）。
+            // 用途只有一个 —— 当"调试（ST-Link + OpenOCD）"报
+            // "A serious error occurred with gdb, unable to continue or interrupt" 时，
+            // 用这个配置排除掉两个附加组件（peripheral-viewer / rtos-views）的干扰。
+            "name": "调试（精简，无外设视图）",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceFolder}/node",
+            "executable": "${workspaceFolder}/node/vision-node.elf",
+            "configFiles": [
+                "interface/stlink.cfg",
+                "target/stm32f4x.cfg"
+            ],
+            "openOCDLaunchCommands": [
+                "adapter speed 1000"
+            ],
+            "device": "STM32F407ZG",
+            // 这个配置故意不写 runToEntryPoint。
+            // "停在 main" 是靠 gdb 临时插一个硬件断点实现的，而 Cortex-M4 一共只有 6 个
+            // 硬件断点单元；你在编辑器里留下的断点一多（本项目就踩过 6 个占满），
+            // 第 7 个插不进去，gdb 会报
+            //   "Cannot insert hardware breakpoint 2: Remote failure reply: 0E"
+            // 紧接着 continue 失败，Cortex-Debug 就弹
+            //   "A serious error occurred with gdb, unable to continue or interrupt"。
+            // 去掉这一行 => 启动后停在复位向量，按 F5 继续即可，不再消耗断点单元。
+            "preLaunchTask": "kill-openocd",
+            "armToolchainPath": "${env:HOME}/opt/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin",
+            "preLaunchCommands": [
+                "set logging file /tmp/cortex-gdb.log",
+                "set logging overwrite on",
+                "set logging enabled on"
+            ],
+            "showDevDebugOutput": "none"
         }
+
     ]
 }
