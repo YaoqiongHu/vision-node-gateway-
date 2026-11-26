@@ -3,7 +3,7 @@
     "configurations": [
         {
             "name": "STM32F407 (arm-none-eabi)",
-            "compilerPath": "/home/huyaoqiong/opt/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin/arm-none-eabi-gcc",
+            "compilerPath": "${env:HOME}/opt/arm-gnu-toolchain-14.3.rel1-x86_64-arm-none-eabi/bin/arm-none-eabi-gcc",
             "intelliSenseMode": "gcc-arm",
             "cStandard": "c11",
             "defines": [

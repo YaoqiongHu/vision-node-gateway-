@@ -86,6 +86,51 @@
  * 组成：BRP=5 | TS1=10<<16 | TS2=1<<20 = 0x001A0005 */
 #define BOARD_CAN_BTR           0x001A0005U
 
+/* ---------- DCMI（摄像头数据通道）----------
+ * 11 根，每根在 F407 上只有 AF13 一个映射，换不了脚：
+ *   D0=PC6  D1=PC7  D2=PC8  D3=PC9  D4=PC11  D5=PD3  D6=PB8  D7=PB9
+ *   PIXCLK=PA6   HSYNC(HREF)=PA4   VSYNC=PB7
+ * 排针号见 docs/wiring.md §2.1。 */
+#define BOARD_DCMI              DCMI
+#define BOARD_DCMI_AF           13U
+
+#define BOARD_DCMI_PIXCLK_PORT  GPIOA
+#define BOARD_DCMI_PIXCLK_PIN   6U
+#define BOARD_DCMI_HSYNC_PORT   GPIOA
+#define BOARD_DCMI_HSYNC_PIN    4U
+#define BOARD_DCMI_VSYNC_PORT   GPIOB
+#define BOARD_DCMI_VSYNC_PIN    7U
+
+#define BOARD_DCMI_D0_PORT      GPIOC
+#define BOARD_DCMI_D0_PIN       6U
+#define BOARD_DCMI_D1_PORT      GPIOC
+#define BOARD_DCMI_D1_PIN       7U
+#define BOARD_DCMI_D2_PORT      GPIOC
+#define BOARD_DCMI_D2_PIN       8U
+#define BOARD_DCMI_D3_PORT      GPIOC
+#define BOARD_DCMI_D3_PIN       9U
+#define BOARD_DCMI_D4_PORT      GPIOC
+#define BOARD_DCMI_D4_PIN       11U
+/* D5：本板的 PD3（J3-19）被硬短到地（推挽输出拉高后 IDR 仍读 0），
+ * 因此改走 PB6（J3-4），它同样有 DCMI_D5 的 AF13 功能。 */
+#define BOARD_DCMI_D5_PORT      GPIOB
+#define BOARD_DCMI_D5_PIN       6U
+#define BOARD_DCMI_D6_PORT      GPIOB
+#define BOARD_DCMI_D6_PIN       8U
+#define BOARD_DCMI_D7_PORT      GPIOB
+#define BOARD_DCMI_D7_PIN       9U
+
+/* 图像尺寸：OV7670 出 QQVGA（160x120）RGB565，DCW 硬件 2:1 降采样。
+ *   一帧字节数 = 160 * 120 * 2 = 38,400 B（是 4 的倍数，DCMI 要求） */
+#define BOARD_IMG_WIDTH         160U
+#define BOARD_IMG_HEIGHT        120U
+#define BOARD_IMG_BPP           2U
+#define BOARD_IMG_BYTES         (BOARD_IMG_WIDTH * BOARD_IMG_HEIGHT * BOARD_IMG_BPP)
+
+/* 传图用的波特率。115200 下一帧约 3.3 s（够看清画面）；
+ * USB-TTL 支持的话可以提到 921600（约 0.42 s）或 2000000。 */
+#define BOARD_IMG_BAUD          115200U
+
 /* ---------- 调试口 ----------
  * SWD：PA13 = SWDIO（J3-28）、PA14 = SWCLK（J3-27）。这两个脚不要挪作他用。 */
 

@@ -3,7 +3,7 @@
 
 #include "stm32f4xx.h"
 #include "board.h"
-#include "bsp_can.h"
+#include "bsp_dcmi.h"
 #include "bsp_dwt.h"
 #include "bsp_i2c_soft.h"
 #include "bsp_uart.h"
@@ -19,9 +19,30 @@ volatile uint32_t g_selftest_tx;
 volatile uint32_t g_selftest_rx;
 volatile int32_t  g_selftest_result;   /* 1 = 通过 / 0 = 不匹配 / -1 = 没收到 */
 volatile uint16_t g_sccb_id;           /* (PID << 8) | VER，正常 0x7673 */
-volatile int32_t  g_can_loopback = -2; /* 0 = 回环自测通过；-1 = 失败；-2 = 还没跑 */
-volatile uint32_t g_can_tx_ok;         /* 正常模式下成功发出的帧数 */
-volatile uint32_t g_can_tx_fail;       /* 发不出去（对端没上线 / 没 ACK）的次数 */
+volatile int32_t  g_img_result = -2;   /* 0 = 抓帧成功；-1 = 超时；-2 = 溢出错误 */
+volatile uint32_t g_img_ms;            /* 抓到一帧用掉多少毫秒 */
+volatile uint32_t g_img_sum;           /* 整帧字节累加和，给调试器核对 */
+/* 总线探针：[0]=PCLK [1]=HREF [2]=VSYNC [3..10]=D0..D7，
+ * 存的是 50 ms 窗口内该位被采到高电平的次数（不是"是/否"）。 */
+volatile uint32_t g_probe[11];
+volatile uint32_t g_sweep[8][4];
+volatile uint32_t g_frame_off;
+volatile uint32_t g_vsync_cnt;
+volatile uint8_t  g_raw[4096];
+extern void bsp_cam_raw_snapshot(uint8_t *buf, uint32_t n);
+extern uint32_t g_dcmi_cm;
+extern uint32_t g_dcmi_pol;
+volatile uint32_t g_pclk_line;
+/* 纯 CPU 轮询 DCMI->DR 抽样：g_poll_words 个 32 位字，直接看一眼原始数据。 */
+volatile uint32_t g_poll_buf[16];
+volatile uint32_t g_poll_words;
+volatile uint32_t g_bb_words;
+volatile uint8_t  g_bb_buf[64];
+
+/* 一帧 QQVGA RGB565：160 x 120 x 2 = 38,400 B。
+ * 必须是普通 SRAM（.bss），DMA 不能访问 CCM。 */
+/* 两帧缓冲：DMA 连续填 2 帧，再用 VSYNC 记录的偏移把其中完整的一帧挪到开头 */
+static uint8_t g_frame[BOARD_IMG_BYTES * 2U] __attribute__((aligned(4)));
 
 /* ---------------------------------------------------------------------------
  * 串口自环自检：把 PA9(TX) 和 PA10(RX) 用一根杜邦线短接，
@@ -161,33 +182,276 @@ static void sccb_selftest(void)
     }
 }
 
-/* S2 第三步：CAN1 自检。
- * 先跑内部回环（控制器自己发自己收，不需要收发器、不需要对端），
- * 通了才能说明位定时和寄存器配置是对的；然后再切回正常模式等对端上线。 */
-static void can_selftest(void)
+/* S3/S4：把摄像头的数据接收通路打通。
+ *
+ * 流程：SCCB 配置 OV7670 → 配 DCMI/DMA → 抓一帧 → 统计 → 通过串口发给电脑。
+ * 这一步只看"能不能收到一帧像样的数据"，二值化和质心是 S5 的事。
+ *
+ * 传给电脑的格式（临时，S8 会换成项目正式帧协议）：
+ *   'I' 'M' 'G' '!'  4 字节魔数
+ *   width  (uint16 LE)
+ *   height (uint16 LE)
+ *   bytes  (uint32 LE)
+ *   payload（width*height*2 字节，RGB565，高字节在前）
+ */
+static void send_image_header(uint32_t width, uint32_t height, uint32_t bytes)
 {
-    uint8_t tec = 0U;
-    uint8_t rec = 0U;
-    int     ok;
+    uint8_t hdr[12];
 
-    if (bsp_can_init() != 0) {
-        printf("[can] init FAILED: controller never left init mode\r\n");
+    hdr[0] = 'I';
+    hdr[1] = 'M';
+    hdr[2] = 'G';
+    hdr[3] = '!';
+    hdr[4] = (uint8_t)(width & 0xFFU);
+    hdr[5] = (uint8_t)((width >> 8) & 0xFFU);
+    hdr[6] = (uint8_t)(height & 0xFFU);
+    hdr[7] = (uint8_t)((height >> 8) & 0xFFU);
+    hdr[8]  = (uint8_t)(bytes & 0xFFU);
+    hdr[9]  = (uint8_t)((bytes >> 8) & 0xFFU);
+    hdr[10] = (uint8_t)((bytes >> 16) & 0xFFU);
+    hdr[11] = (uint8_t)((bytes >> 24) & 0xFFU);
+
+    bsp_uart_write((const char *)hdr, sizeof(hdr));
+}
+
+/* 单字节统计：全 0x00 说明没有 PCLK / 数据线没接，
+ * 全 0xFF 说明数据线被拉高，乱跳说明时序或接线有问题。 */
+static void print_frame_stats(void)
+{
+    uint32_t i;
+    uint32_t sum = 0U;
+    uint32_t zero = 0U;
+    uint32_t full = 0U;
+    uint8_t  lo = 0xFFU;
+    uint8_t  hi = 0x00U;
+    uint16_t px00;
+    uint16_t pxc;
+
+    for (i = 0U; i < BOARD_IMG_BYTES; i++) {
+        uint8_t b = g_frame[i];
+
+        sum += b;
+        if (b == 0x00U) {
+            zero++;
+        } else if (b == 0xFFU) {
+            full++;
+        }
+        if (b < lo) {
+            lo = b;
+        }
+        if (b > hi) {
+            hi = b;
+        }
+    }
+
+    g_img_sum = sum;
+
+    px00 = (uint16_t)((g_frame[0] << 8) | g_frame[1]);
+    pxc  = (uint16_t)((g_frame[(60U * BOARD_IMG_WIDTH + 80U) * 2U] << 8)
+                    | g_frame[(60U * BOARD_IMG_WIDTH + 80U) * 2U + 1U]);
+
+    printf("[cam] frame %lu B  min=0x%02X max=0x%02X mean=%lu  zero=%lu ff=%lu\r\n",
+           (unsigned long)BOARD_IMG_BYTES,
+           (unsigned)lo, (unsigned)hi,
+           (unsigned long)(sum / BOARD_IMG_BYTES),
+           (unsigned long)zero, (unsigned long)full);
+    printf("[cam] pixel(0,0)=0x%04X  pixel(80,60)=0x%04X  dcmi_sr=0x%08lX\r\n",
+           (unsigned)px00, (unsigned)pxc,
+           (unsigned long)bsp_dcmi_status());
+}
+
+
+/* ---------------------------------------------------------------------------
+ * 摄像头总线探针：在 50 ms 窗口里拼命采样 DCMI 那几根脚，
+ * 统计每根线被采到"高"的次数。用来区分"摄像头没输出"和"线没接进来"。
+ *   PCLK/HREF/VSYNC 都在动、D0..D7 全 0  -> 数据线没进来
+ *   全都 0                               -> 摄像头没在出图（PWDN/RESET/XCLK）
+ * 注意：这只看 MCU 这一侧的引脚，跟逻辑分析仪量模块那一侧是两回事。
+ * ------------------------------------------------------------------------- */
+static void probe_camera_bus(uint32_t ms)
+{
+    uint32_t hi[11];
+    uint32_t samples = 0U;
+    uint32_t t0 = dwt_cycles();
+    uint32_t i;
+
+    for (i = 0U; i < 11U; i++) {
+        hi[i] = 0U;
+    }
+
+    while (dwt_elapsed_us(t0) < (ms * 1000U)) {
+        uint32_t a = GPIOA->IDR;
+        uint32_t b = GPIOB->IDR;
+        uint32_t c = GPIOC->IDR;
+        uint32_t d = GPIOD->IDR;
+
+        hi[0]  += (a >> BOARD_DCMI_PIXCLK_PIN) & 1U;
+        hi[1]  += (a >> BOARD_DCMI_HSYNC_PIN)  & 1U;
+        hi[2]  += (b >> BOARD_DCMI_VSYNC_PIN)  & 1U;
+        hi[3]  += (c >> BOARD_DCMI_D0_PIN)     & 1U;
+        hi[4]  += (c >> BOARD_DCMI_D1_PIN)     & 1U;
+        hi[5]  += (c >> BOARD_DCMI_D2_PIN)     & 1U;
+        hi[6]  += (c >> BOARD_DCMI_D3_PIN)     & 1U;
+        hi[7]  += (c >> BOARD_DCMI_D4_PIN)     & 1U;
+        hi[8]  += (d >> BOARD_DCMI_D5_PIN)     & 1U;
+        hi[9]  += (b >> BOARD_DCMI_D6_PIN)     & 1U;
+        hi[10] += (b >> BOARD_DCMI_D7_PIN)     & 1U;
+        samples++;
+    }
+
+    for (i = 0U; i < 11U; i++) {
+        g_probe[i] = hi[i];
+    }
+
+    printf("[cam] bus probe %lu samples in %lu ms: PCLK=%lu HREF=%lu VSYNC=%lu\r\n",
+           (unsigned long)samples, (unsigned long)ms,
+           (unsigned long)hi[0], (unsigned long)hi[1], (unsigned long)hi[2]);
+    printf("[cam] data high counts: D0=%lu D1=%lu D2=%lu D3=%lu D4=%lu D5=%lu D6=%lu D7=%lu\r\n",
+           (unsigned long)hi[3], (unsigned long)hi[4], (unsigned long)hi[5],
+           (unsigned long)hi[6], (unsigned long)hi[7], (unsigned long)hi[8],
+           (unsigned long)hi[9], (unsigned long)hi[10]);
+}
+
+static void camera_selftest(void)
+{
+    int      rc;
+
+    if (!ov7670_present()) {
+        printf("[cam] OV7670 not answering on SCCB, skip DCMI\r\n");
         return;
     }
 
-    ok = bsp_can_loopback_selftest();
-    g_can_loopback = (int32_t)ok;
-    bsp_can_error_counters(&tec, &rec);
+    rc = ov7670_init_rgb565_qqvga();
+    printf("[cam] OV7670 -> QQVGA RGB565 %s\r\n", (rc == 0) ? "OK" : "PARTIAL (some regs NACK)");
 
-    printf("[can] loopback %s  BTR=0x%08lX (%lu kbps)  TEC=%u REC=%u\r\n",
-           (ok == 0) ? "OK" : "FAIL",
-           (unsigned long)bsp_can_btr(),
-           (unsigned long)(BOARD_CAN_BITRATE / 1000U),
-           (unsigned)tec, (unsigned)rec);
-    printf("            PD0/PD1 AF%lu  GPIOD MODER=0x%08lX AFR=0x%08lX\r\n",
-           (unsigned long)BOARD_CAN_AF,
-           (unsigned long)GPIOD->MODER,
-           (unsigned long)GPIOD->AFR[0]);
+    if (bsp_dcmi_init(g_frame, BOARD_IMG_BYTES) != 0) {
+        printf("[cam] DCMI init FAILED\r\n");
+        return;
+    }
+
+    probe_camera_bus(50U);
+
+    g_poll_words = bsp_dcmi_poll_words((uint32_t *)g_poll_buf, 16U, 300U);
+
+    /* 帧缓冲先填 0xAA：抓完若还是 0xAA，说明 DMA 根本没往这里写；
+     * 若变成 0x00，说明 DMA 写了，只是 DCMI 送来的是 0。 */
+    memset(g_frame, 0xAA, BOARD_IMG_BYTES);
+
+    /* 位敲采样：绕过 DCMI，直接看焊盘上的字节 */
+    {
+        static uint8_t bb[256];
+        g_bb_words = bsp_cam_bitbang(bb, 64U, 300U);
+        for (uint32_t i = 0U; i < 16U; i++) {
+            g_bb_buf[i] = bb[i];
+        }
+    }
+
+    (void)ov7670_test_pattern(1);     /* 打开八色条：与光照无关，便于判断接线 */
+    {
+        /* 回读关键寄存器，确认写入真的生效了 */
+        uint8_t r12 = 0xFFU, r40 = 0xFFU, r0c = 0xFFU, r3e = 0xFFU, r70 = 0xFFU, r71 = 0xFFU;
+        (void)ov7670_read_reg(0x12U, &r12);
+        (void)ov7670_read_reg(0x40U, &r40);
+        (void)ov7670_read_reg(0x0CU, &r0c);
+        (void)ov7670_read_reg(0x3EU, &r3e);
+        (void)ov7670_read_reg(0x70U, &r70);
+        (void)ov7670_read_reg(0x71U, &r71);
+        printf("[cam] readback 0x12=%02x 0x40=%02x 0x0C=%02x 0x3E=%02x 0x70=%02x 0x71=%02x\r\n",
+               r12, r40, r0c, r3e, r70, r71);
+    }
+    bsp_cam_raw_snapshot((uint8_t *)g_raw, 4096U);
+
+    /* 对照实验：传感器正常 vs COM2 软件掉电。
+     * 两次直方图若几乎一样 → 数据线根本没被传感器驱动（接线/模块问题）；
+     * 差异明显 → 数据线确实在传数据，问题在 DCMI 采样。 */
+    {
+        uint32_t i, z, f, o;
+
+        z = f = o = 0;
+        for (i = 0; i < 4096U; i++) {
+            uint8_t v = g_raw[i];
+            if (v == 0x00U) {
+                z++;
+            } else if (v == 0xFFU) {
+                f++;
+            } else {
+                o++;
+            }
+        }
+        printf("[cam] awake : zero=%lu ff=%lu other=%lu\r\n",
+               (unsigned long)z, (unsigned long)f, (unsigned long)o);
+
+        (void)ov7670_sleep(1);
+        dwt_delay_ms(20U);
+        bsp_cam_raw_snapshot((uint8_t *)g_raw, 4096U);
+        z = f = o = 0;
+        for (i = 0; i < 4096U; i++) {
+            uint8_t v = g_raw[i];
+            if (v == 0x00U) {
+                z++;
+            } else if (v == 0xFFU) {
+                f++;
+            } else {
+                o++;
+            }
+        }
+        printf("[cam] asleep: zero=%lu ff=%lu other=%lu\r\n",
+               (unsigned long)z, (unsigned long)f, (unsigned long)o);
+        (void)ov7670_sleep(0);
+        dwt_delay_ms(20U);
+    }
+
+    /* 连续模式抓两帧（76,800 B），VSYNC 中断给帧首打了标记，
+     * 抓完把完整的那一帧挪到缓冲区开头。 */
+    g_dcmi_cm  = 0U;   /* 快照模式(CWSIZE)在本板上始终抓不到数据，只能用连续模式 */
+    /* 极性：OV7670 的 HREF 与 VSYNC 都是**高有效**，所以 HSPOL/VSPOL 必须为 0。
+     * 之前三位全置 1（HSPOL=1 表示"HREF 低有效"），DCMI 于是在
+     * 行消隐期采样 —— 那一小段时间数据线上是常数 0x01，
+     * 于是"帧长正好 38,400、内容恒为 0x01"。这是本次的关键 bug。
+     * PCKPOL=1：在 PCLK 上升沿采样（传感器在下降沿换数据）。 */
+    g_dcmi_pol = DCMI_CR_PCKPOL;
+
+    /* 实测"一行到底有多少个 PCLK"：每个 PCLK 出一个字节，
+     * 所以这个数字就是每行的字节数（320 = RGB565 正常，160 = 只出一半）。 */
+    g_pclk_line = 0U;   /* 轮询数 PCLK 在 8 MHz 下太慢（实测只数到 57），别再用了 */
+    printf("[cam] PCLK per line = %lu (expect 320 for RGB565)\r\n",
+           (unsigned long)g_pclk_line);
+    bsp_dcmi_init(g_frame, BOARD_IMG_BYTES * 2U);
+    memset(g_frame, 0xAA, BOARD_IMG_BYTES * 2U);
+    rc = bsp_dcmi_capture(500U);
+    g_img_ms     = bsp_dcmi_last_ms();
+    g_vsync_cnt  = bsp_dcmi_vsync_count();
+
+    if (rc == 0) {
+        uint32_t off = bsp_dcmi_frame_offset();
+        g_frame_off = off;
+        /* 就地平移：memmove 处理重叠，源和目的都在同一块缓冲里 */
+        memmove(g_frame, g_frame + off, BOARD_IMG_BYTES);
+        rc = 0;
+    }
+    g_img_result = (int32_t)rc;
+    g_img_ms     = bsp_dcmi_last_ms();
+
+    if (rc != 0) {
+        printf("[cam] capture %s after %lu ms  sr=0x%08lX\r\n",
+               (rc == -1) ? "TIMEOUT" : "ERROR",
+               (unsigned long)g_img_ms,
+               (unsigned long)bsp_dcmi_status());
+        printf("[cam] timeout usually means: no PCLK (XCLK?), D0-D7 not connected, "
+               "or PWDN/RESET floating\r\n");
+        return;
+    }
+
+    printf("[cam] capture OK in %lu ms\r\n", (unsigned long)g_img_ms);
+    print_frame_stats();
+
+    /* 把这一帧发给电脑，约 3.3 s（115200）。 */
+    printf("[cam] sending %lu bytes over UART, please wait...\r\n",
+           (unsigned long)BOARD_IMG_BYTES);
+    send_image_header(BOARD_IMG_WIDTH, BOARD_IMG_HEIGHT, BOARD_IMG_BYTES);
+    bsp_uart_write((const char *)g_frame, BOARD_IMG_BYTES);
+    bsp_uart_flush();
+    printf("\r\n[cam] image sent\r\n");
 }
 
 int main(void)
@@ -204,7 +468,7 @@ int main(void)
     print_banner();
     print_xclk(xclk_ok);
     sccb_selftest();
-    can_selftest();
+    camera_selftest();
     uart_loopback_selftest();
 
     /* S1b：从这里交给 FreeRTOS。main() 之后不再返回。 */

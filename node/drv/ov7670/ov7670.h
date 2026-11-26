@@ -39,4 +39,18 @@ uint16_t ov7670_chip_id(void);
 /** 1 = PID 和 VER 都对，说明 SCCB 通路完全正常。 */
 int ov7670_present(void);
 
+/**
+ * 把 OV7670 配成 QQVGA(160x120) + RGB565，DCW 硬件 2:1 降采样。
+ *
+ * 一帧 38,400 字节，正好是 4 的倍数（DCMI 要求帧字节数为 4 的倍数）。
+ * 会做一次软复位，所以要在初始化 DCMI **之前**调用。
+ *
+ * @return 0 = 全部写成功；-1 = 有寄存器没应答（SCCB 不通）
+ */
+int ov7670_init_rgb565_qqvga(void);
+int ov7670_test_pattern(int on);
+
+/* COM2[6] 软件掉电：用来判断数据线到底有没有被传感器驱动 */
+int ov7670_sleep(int on);
+
 #endif /* OV7670_H */
